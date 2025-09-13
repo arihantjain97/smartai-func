@@ -1,0 +1,4 @@
+azure-functions
+azure-identity==1.17.1
+azure-ai-formrecognizer==3.2.1
+azure-storage-blob==12.19.1
