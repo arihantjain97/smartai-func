@@ -1,43 +1,33 @@
-import os
 import logging
-import os.path
+import os
 import azure.functions as func
 from azure.identity import DefaultAzureCredential
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.storage.blob import BlobServiceClient
 
-def _basename_no_ext(blob_path: str) -> str:
-    base = blob_path.replace("\\", "/").split("/")[-1]
-    return os.path.splitext(base)[0]
+app = func.FunctionApp()
 
-def main(inputBlob: func.InputStream):
-    logging.info(f"[evidence_extract] Blob arrived: {inputBlob.name} ({inputBlob.length} bytes)")
-    try:
-        # --- 1) Call Document Intelligence (Managed Identity) ---
-        endpoint = os.environ["DOCINT_ENDPOINT"].rstrip("/")
-        credential = DefaultAzureCredential()
-        client = DocumentAnalysisClient(endpoint=endpoint, credential=credential)
+@app.blob_trigger(arg_name="inputBlob",
+                  path="uploads/{name}",
+                  connection="AzureWebJobsStorage")
+def evidence_extract(inputBlob: func.InputStream):
+    logging.info("Blob arrived: %s (%d bytes)", inputBlob.name, inputBlob.length)
 
-        # Use prebuilt-read to extract plain text
-        poller = client.begin_analyze_document("prebuilt-read", inputBlob.read())
-        result = poller.result()
+    # ---- 1) Call Document Intelligence (Managed Identity) ----
+    endpoint = os.environ["DOCINT_ENDPOINT"].rstrip("/")
+    credential = DefaultAzureCredential()
+    client = DocumentAnalysisClient(endpoint=endpoint, credential=credential)
 
-        pages_text = []
-        for page in result.pages:
-            lines = [line.content for line in page.lines]
-            pages_text.append("\n".join(lines))
-        text = "\n\n".join(pages_text) or "(no text detected)"
+    # read the blob stream directly
+    poller = client.begin_analyze_document("prebuilt-document", inputBlob)
+    result = poller.result()
+    logging.info("Analyzed %s pages", len(result.pages))
 
-        # --- 2) Save to evidence/<name>.txt in the same storage account ---
-        conn = os.environ["AzureWebJobsStorage"]  # connection string to sgdevst01
-        blob_service = BlobServiceClient.from_connection_string(conn)
-        evidence_container = os.environ.get("EVIDENCE_CONTAINER", "evidence")
-
-        out_name = _basename_no_ext(inputBlob.name) + ".txt"
-        out_client = blob_service.get_blob_client(evidence_container, out_name)
-        out_client.upload_blob(text, overwrite=True)
-
-        logging.info(f"[evidence_extract] Wrote evidence/{out_name} ({len(text)} chars)")
-    except Exception as ex:
-        logging.exception(f"[evidence_extract] Failed: {ex}")
-        raise
+    # ---- 2) (Optional) write output back to storage ----
+    out_container = os.environ.get("EVIDENCE_CONTAINER", "evidence")
+    account_url = f"https://{os.environ['AzureWebJobsStorage'].split('AccountName=')[1].split(';')[0]}.blob.core.windows.net"
+    bs = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
+    bs.get_container_client(out_container).upload_blob(
+        name=f"{os.path.splitext(os.path.basename(inputBlob.name))[0]}.json",
+        data=b"{}", overwrite=True
+    )
